@@ -31,38 +31,33 @@ if _cookies_b64 and not os.path.exists(COOKIES_FILE):
         print(f"⚠️ فشل استعادة cookies: {_e}")
 
 # ─────────────────────────────────────────────
-# فورمات مرن: يحاول الجودة المطلوبة وإن فشل يأخذ الأفضل المتاح
 QUALITY_OPTIONS = {
-    "1080": ("FHD – 1080p", [
-        "best[height<=1080][ext=mp4]",
-        "best[height<=1080]",
-        "best[ext=mp4]",
-        "best",
-    ]),
-    "720": ("HD  –  720p", [
-        "best[height<=720][ext=mp4]",
-        "best[height<=720]",
-        "best[ext=mp4]",
-        "best",
-    ]),
-    "480": ("SD  –  480p", [
-        "best[height<=480][ext=mp4]",
-        "best[height<=480]",
-        "best[ext=mp4]",
-        "best",
-    ]),
-    "360": ("LOW –  360p", [
-        "best[height<=360][ext=mp4]",
-        "best[height<=360]",
-        "best[ext=mp4]",
-        "best",
-    ]),
-    "audio": ("🎵 صوت فقط – MP3", [
-        "bestaudio[ext=m4a]",
-        "bestaudio[ext=mp3]",
-        "bestaudio",
-    ]),
+    "1080": "FHD – 1080p",
+    "720":  "HD  –  720p",
+    "480":  "SD  –  480p",
+    "360":  "LOW –  360p",
+    "audio":"🎵 صوت فقط",
 }
+
+def get_format(quality_key: str, is_youtube: bool) -> str:
+    """
+    يوتيوب: يدعم فلتر الجودة
+    باقي المنصات: best فقط بدون فلتر
+    """
+    if quality_key == "audio":
+        return "bestaudio[ext=m4a]/bestaudio"
+
+    if is_youtube:
+        h = quality_key  # 1080, 720, 480, 360
+        return (
+            f"best[height<={h}][ext=mp4]"
+            f"/best[height<={h}]"
+            f"/best[ext=mp4]"
+            f"/best"
+        )
+    else:
+        # منصات أخرى: خذ الأفضل المتاح مباشرة
+        return "best[ext=mp4]/best"
 
 # ─────────────────────────────────────────────
 def base_ydl_opts() -> dict:
@@ -76,8 +71,9 @@ def base_ydl_opts() -> dict:
         },
         "http_headers": {
             "User-Agent": (
-                "com.google.ios.youtube/19.09.3 "
-                "(iPhone14,3; U; CPU iPhone OS 16_0 like Mac OS X)"
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
             ),
         },
     }
@@ -86,31 +82,17 @@ def base_ydl_opts() -> dict:
     return opts
 
 
-def build_ydl_opts(quality_key: str, output_template: str) -> dict:
-    _, formats = QUALITY_OPTIONS[quality_key]
-    # دمج الفورمات بـ / حتى يجرب الأول فالثاني...
-    fmt = "/".join(formats)
-    opts = base_ydl_opts()
-    opts.update({
-        "format": fmt,
-        "outtmpl": output_template,
-        "noplaylist": True,
-        "prefer_ffmpeg": False,
-        "postprocessors": [],
-    })
-    return opts
+def is_youtube_url(url: str) -> bool:
+    return any(d in url for d in ["youtube.com", "youtu.be"])
 
 
-# ─────────────────────────────────────────────
 def find_new_file(before: set) -> str | None:
     after = set(glob.glob(os.path.join(DOWNLOAD_DIR, "*")))
     new = after - before
     if new:
         return max(new, key=os.path.getmtime)
-    # إذا لم يُكتشف ملف جديد، أرجع أحدث ملف
-    all_files = list(after)
-    if all_files:
-        return max(all_files, key=os.path.getmtime)
+    if after:
+        return max(after, key=os.path.getmtime)
     return None
 
 
@@ -123,6 +105,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     context.user_data["url"] = url
+    context.user_data["is_youtube"] = is_youtube_url(url)
     status = await update.message.reply_text("🔍 جاري قراءة معلومات الفيديو...")
 
     try:
@@ -138,12 +121,19 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mins, secs = divmod(int(duration), 60)
     context.user_data["title"] = title
 
-    buttons = [
-        [InlineKeyboardButton(label, callback_data=f"quality:{key}")]
-        for key, (label, _) in QUALITY_OPTIONS.items()
-    ]
-    keyboard = InlineKeyboardMarkup(buttons)
+    # إذا مش يوتيوب — أزرار مبسطة
+    if not context.user_data["is_youtube"]:
+        buttons = [
+            [InlineKeyboardButton("⬇️ تحميل الفيديو", callback_data="quality:best")],
+            [InlineKeyboardButton("🎵 صوت فقط", callback_data="quality:audio")],
+        ]
+    else:
+        buttons = [
+            [InlineKeyboardButton(label, callback_data=f"quality:{key}")]
+            for key, label in QUALITY_OPTIONS.items()
+        ]
 
+    keyboard = InlineKeyboardMarkup(buttons)
     text = (
         f"🎬 *{title[:60]}*\n"
         f"👤 {uploader}   ⏱ {mins}:{secs:02d}\n\n"
@@ -158,24 +148,35 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
 
     quality_key = query.data.split(":")[1]
-    url = context.user_data.get("url")
+    url         = context.user_data.get("url")
+    is_yt       = context.user_data.get("is_youtube", False)
 
     if not url:
         await query.edit_message_text("❌ انتهت الجلسة، أرسل الرابط من جديد.")
         return
 
-    label, _ = QUALITY_OPTIONS[quality_key]
+    label = QUALITY_OPTIONS.get(quality_key, "الجودة المتاحة")
     await query.edit_message_text(
         f"⏳ جاري التحميل بجودة *{label}* ...", parse_mode="Markdown"
     )
 
     before_files = set(glob.glob(os.path.join(DOWNLOAD_DIR, "*")))
-    template = os.path.join(DOWNLOAD_DIR, "%(id)s_%(height)s.%(ext)s")
-    ydl_opts = build_ydl_opts(quality_key, template)
+    fmt          = get_format(quality_key, is_yt)
+    template     = os.path.join(DOWNLOAD_DIR, "%(id)s_%(height)s.%(ext)s")
+
+    opts = base_ydl_opts()
+    opts.update({
+        "format": fmt,
+        "outtmpl": template,
+        "noplaylist": True,
+        "prefer_ffmpeg": False,
+        "postprocessors": [],
+    })
+
     file_path = None
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
 
             # محاولة 1: requested_downloads
@@ -196,15 +197,14 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
             file_path = find_new_file(before_files)
 
         if not file_path or not os.path.exists(file_path):
-            await query.edit_message_text("❌ لم يُعثر على الملف بعد التحميل.")
+            await query.edit_message_text("❌ لم يُعثر على الملف.")
             return
 
         size_mb = os.path.getsize(file_path) / (1024 * 1024)
         if size_mb > MAX_FILE_SIZE_MB:
             os.remove(file_path)
             await query.edit_message_text(
-                f"❌ حجم الملف *{size_mb:.1f} MB* يتجاوز حد تيليغرام ({MAX_FILE_SIZE_MB} MB).\n"
-                f"جرّب جودة أقل 👇",
+                f"❌ الملف كبير جداً ({size_mb:.1f} MB)\nجرّب جودة أقل 👇",
                 parse_mode="Markdown"
             )
             return
