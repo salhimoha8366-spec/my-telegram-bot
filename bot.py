@@ -31,15 +31,15 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "outtmpl": "downloads/%(title)s.%(ext)s",
             "noplaylist": True,
             "quiet": True,
+            # هذا السطر للتمويه لكي لا يكتشف يوتيوب أنه بوت
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # تحميل المعلومات والملف
             info = ydl.extract_info(url, download=True)
-
             file_path = ydl.prepare_filename(info)
-
             base_name = os.path.splitext(file_path)[0]
-
             if os.path.exists(base_name + ".mp4"):
                 file_path = base_name + ".mp4"
 
@@ -51,26 +51,19 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 supports_streaming=True
             )
 
+        # مسح الملف بعد الإرسال لتوفير المساحة في السيرفر
         if os.path.exists(file_path):
             os.remove(file_path)
 
         await status.delete()
 
     except Exception as e:
-        await status.edit_text(f"❌ خطأ:\n{e}")
+        await status.edit_text(f"❌ حدث خطأ أثناء التحميل:\n`{e}`", parse_mode="Markdown")
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            download_video
-        )
-    )
-
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
     print("✅ Bot Started")
-
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
