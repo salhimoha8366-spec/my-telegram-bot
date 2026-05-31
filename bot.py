@@ -21,23 +21,47 @@ DOWNLOAD_DIR = "downloads"
 COOKIES_FILE = "cookies.txt"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# ── استعادة cookies من متغير البيئة إن وُجد ──
 _cookies_b64 = os.getenv("COOKIES_B64")
 if _cookies_b64 and not os.path.exists(COOKIES_FILE):
     try:
         with open(COOKIES_FILE, "wb") as _f:
             _f.write(base64.b64decode(_cookies_b64))
-        print("✅ cookies.txt تم استعادته من COOKIES_B64")
+        print("✅ cookies.txt تم استعادته")
     except Exception as _e:
         print(f"⚠️ فشل استعادة cookies: {_e}")
 
 # ─────────────────────────────────────────────
+# فورمات مرن: يحاول الجودة المطلوبة وإن فشل يأخذ الأفضل المتاح
 QUALITY_OPTIONS = {
-    "1080": ("FHD – 1080p", "best[height<=1080][ext=mp4]/best[height<=1080]/best"),
-    "720":  ("HD  –  720p", "best[height<=720][ext=mp4]/best[height<=720]/best"),
-    "480":  ("SD  –  480p", "best[height<=480][ext=mp4]/best[height<=480]/best"),
-    "360":  ("LOW –  360p", "best[height<=360][ext=mp4]/best[height<=360]/best"),
-    "audio":("🎵 صوت فقط – MP3", "bestaudio[ext=m4a]/bestaudio"),
+    "1080": ("FHD – 1080p", [
+        "best[height<=1080][ext=mp4]",
+        "best[height<=1080]",
+        "best[ext=mp4]",
+        "best",
+    ]),
+    "720": ("HD  –  720p", [
+        "best[height<=720][ext=mp4]",
+        "best[height<=720]",
+        "best[ext=mp4]",
+        "best",
+    ]),
+    "480": ("SD  –  480p", [
+        "best[height<=480][ext=mp4]",
+        "best[height<=480]",
+        "best[ext=mp4]",
+        "best",
+    ]),
+    "360": ("LOW –  360p", [
+        "best[height<=360][ext=mp4]",
+        "best[height<=360]",
+        "best[ext=mp4]",
+        "best",
+    ]),
+    "audio": ("🎵 صوت فقط – MP3", [
+        "bestaudio[ext=m4a]",
+        "bestaudio[ext=mp3]",
+        "bestaudio",
+    ]),
 }
 
 # ─────────────────────────────────────────────
@@ -63,7 +87,9 @@ def base_ydl_opts() -> dict:
 
 
 def build_ydl_opts(quality_key: str, output_template: str) -> dict:
-    _, fmt = QUALITY_OPTIONS[quality_key]
+    _, formats = QUALITY_OPTIONS[quality_key]
+    # دمج الفورمات بـ / حتى يجرب الأول فالثاني...
+    fmt = "/".join(formats)
     opts = base_ydl_opts()
     opts.update({
         "format": fmt,
@@ -76,13 +102,15 @@ def build_ydl_opts(quality_key: str, output_template: str) -> dict:
 
 
 # ─────────────────────────────────────────────
-def find_downloaded_file(download_dir: str, before_files: set) -> str | None:
-    """يجد الملف الجديد الذي تم تحميله بمقارنة الملفات قبل وبعد التحميل"""
-    after_files = set(glob.glob(os.path.join(download_dir, "*")))
-    new_files = after_files - before_files
-    if new_files:
-        # أرجع الملف الأحدث
-        return max(new_files, key=os.path.getmtime)
+def find_new_file(before: set) -> str | None:
+    after = set(glob.glob(os.path.join(DOWNLOAD_DIR, "*")))
+    new = after - before
+    if new:
+        return max(new, key=os.path.getmtime)
+    # إذا لم يُكتشف ملف جديد، أرجع أحدث ملف
+    all_files = list(after)
+    if all_files:
+        return max(all_files, key=os.path.getmtime)
     return None
 
 
@@ -141,9 +169,7 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
         f"⏳ جاري التحميل بجودة *{label}* ...", parse_mode="Markdown"
     )
 
-    # تسجيل الملفات الموجودة قبل التحميل
     before_files = set(glob.glob(os.path.join(DOWNLOAD_DIR, "*")))
-
     template = os.path.join(DOWNLOAD_DIR, "%(id)s_%(height)s.%(ext)s")
     ydl_opts = build_ydl_opts(quality_key, template)
     file_path = None
@@ -152,30 +178,27 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
 
-            # محاولة 1: من requested_downloads
+            # محاولة 1: requested_downloads
             downloads = info.get("requested_downloads", [])
             if downloads and downloads[0].get("filepath"):
-                file_path = downloads[0]["filepath"]
+                fp = downloads[0]["filepath"]
+                if os.path.exists(fp):
+                    file_path = fp
 
             # محاولة 2: prepare_filename
-            if not file_path or not os.path.exists(file_path):
-                file_path = ydl.prepare_filename(info)
+            if not file_path:
+                fp = ydl.prepare_filename(info)
+                if os.path.exists(fp):
+                    file_path = fp
 
-        # محاولة 3: مقارنة الملفات قبل وبعد
-        if not file_path or not os.path.exists(file_path):
-            file_path = find_downloaded_file(DOWNLOAD_DIR, before_files)
-
-        # محاولة 4: أحدث ملف في المجلد
-        if not file_path or not os.path.exists(file_path):
-            all_files = glob.glob(os.path.join(DOWNLOAD_DIR, "*"))
-            if all_files:
-                file_path = max(all_files, key=os.path.getmtime)
+        # محاولة 3: مقارنة الملفات
+        if not file_path:
+            file_path = find_new_file(before_files)
 
         if not file_path or not os.path.exists(file_path):
             await query.edit_message_text("❌ لم يُعثر على الملف بعد التحميل.")
             return
 
-        # التحقق من الحجم
         size_mb = os.path.getsize(file_path) / (1024 * 1024)
         if size_mb > MAX_FILE_SIZE_MB:
             os.remove(file_path)
@@ -190,7 +213,7 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
 
         ext = os.path.splitext(file_path)[1].lower()
         with open(file_path, "rb") as f:
-            if quality_key == "audio" or ext in (".m4a", ".mp3", ".ogg", ".opus", ".webm"):
+            if quality_key == "audio" or ext in (".m4a", ".mp3", ".ogg", ".opus"):
                 await query.message.reply_audio(
                     audio=f,
                     title=info.get("title", "audio")[:64],
