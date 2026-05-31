@@ -1,24 +1,24 @@
 import os
 import yt_dlp
+import asyncio
 from telegram import Update
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
     MessageHandler,
     ContextTypes,
     filters
 )
 
-BOT_TOKEN = "8327603349:AAF48wieDTXW0AgdUs3qNtq8AallHS9VjU4"
-
+# سنقوم بجلب التوكن من إعدادات البيئة في موقع الاستضافة
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
-
     msg = await update.message.reply_text("⏳ جاري تحميل الفيديو...")
 
     try:
         ydl_opts = {
-            "format": "bestvideo+bestaudio/best",
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "outtmpl": "downloads/%(title)s.%(ext)s",
             "merge_output_format": "mp4",
             "noplaylist": True,
@@ -30,7 +30,8 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             file_path = ydl.prepare_filename(info)
-
+            
+            # التأكد من المسار الصحيح للملف بعد التحميل
             if not file_path.endswith(".mp4"):
                 base = os.path.splitext(file_path)[0]
                 mp4_file = base + ".mp4"
@@ -49,19 +50,22 @@ async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.delete()
 
     except Exception as e:
-        await msg.edit_text(f"❌ خطأ:\n{e}")
+        await msg.edit_text(f"❌ خطأ في تحميل الفيديو:\n{str(e)}")
 
+async def main():
+    if not BOT_TOKEN:
+        print("خطأ: يرجى ضبط متغير البيئة BOT_TOKEN")
+        return
 
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, download_video)
-    )
+    # حذف الـ Webhook القديم قبل بدء الـ Polling لحل مشكلة الـ Conflict
+    await app.bot.delete_webhook(drop_pending_updates=True)
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
 
     print("Bot Started...")
-    app.run_polling()
-
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
