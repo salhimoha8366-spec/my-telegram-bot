@@ -220,10 +220,18 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
                     read_timeout=180,
                     write_timeout=180,
                 )
-            else:
+            elif ext in (".mp4", ".mov", ".avi", ".mkv"):
                 await query.message.reply_video(
                     video=f,
                     supports_streaming=True,
+                    read_timeout=180,
+                    write_timeout=180,
+                )
+            else:
+                # webm أو أي امتداد آخر — أرسله كملف
+                await query.message.reply_document(
+                    document=f,
+                    filename=os.path.basename(file_path),
                     read_timeout=180,
                     write_timeout=180,
                 )
