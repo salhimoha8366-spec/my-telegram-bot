@@ -1,5 +1,6 @@
 import os
 import base64
+import glob
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -31,12 +32,11 @@ if _cookies_b64 and not os.path.exists(COOKIES_FILE):
         print(f"⚠️ فشل استعادة cookies: {_e}")
 
 # ─────────────────────────────────────────────
-# الفورمات بدون ffmpeg — يختار mp4 جاهز مباشرة
 QUALITY_OPTIONS = {
     "1080": ("FHD – 1080p", "best[height<=1080][ext=mp4]/best[height<=1080]/best"),
-    "720":  ("HD  –  720p",  "best[height<=720][ext=mp4]/best[height<=720]/best"),
-    "480":  ("SD  –  480p",  "best[height<=480][ext=mp4]/best[height<=480]/best"),
-    "360":  ("LOW –  360p",  "best[height<=360][ext=mp4]/best[height<=360]/best"),
+    "720":  ("HD  –  720p", "best[height<=720][ext=mp4]/best[height<=720]/best"),
+    "480":  ("SD  –  480p", "best[height<=480][ext=mp4]/best[height<=480]/best"),
+    "360":  ("LOW –  360p", "best[height<=360][ext=mp4]/best[height<=360]/best"),
     "audio":("🎵 صوت فقط – MP3", "bestaudio[ext=m4a]/bestaudio"),
 }
 
@@ -47,11 +47,8 @@ def base_ydl_opts() -> dict:
         "no_warnings": True,
         "socket_timeout": 30,
         "retries": 5,
-        # تجاوز حماية يوتيوب عبر iOS client
         "extractor_args": {
-            "youtube": {
-                "player_client": ["ios", "web"],
-            }
+            "youtube": {"player_client": ["ios", "web"]},
         },
         "http_headers": {
             "User-Agent": (
@@ -62,7 +59,6 @@ def base_ydl_opts() -> dict:
     }
     if os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
-        print("🍪 استخدام cookies.txt")
     return opts
 
 
@@ -73,14 +69,21 @@ def build_ydl_opts(quality_key: str, output_template: str) -> dict:
         "format": fmt,
         "outtmpl": output_template,
         "noplaylist": True,
-        # لا نستخدم ffmpeg إطلاقاً
         "prefer_ffmpeg": False,
         "postprocessors": [],
     })
-    if quality_key == "audio":
-        # تحميل m4a مباشرة بدون تحويل
-        opts["postprocessors"] = []
     return opts
+
+
+# ─────────────────────────────────────────────
+def find_downloaded_file(download_dir: str, before_files: set) -> str | None:
+    """يجد الملف الجديد الذي تم تحميله بمقارنة الملفات قبل وبعد التحميل"""
+    after_files = set(glob.glob(os.path.join(download_dir, "*")))
+    new_files = after_files - before_files
+    if new_files:
+        # أرجع الملف الأحدث
+        return max(new_files, key=os.path.getmtime)
+    return None
 
 
 # ─────────────────────────────────────────────
@@ -138,33 +141,39 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
         f"⏳ جاري التحميل بجودة *{label}* ...", parse_mode="Markdown"
     )
 
-    template  = os.path.join(DOWNLOAD_DIR, "%(id)s.%(ext)s")
-    ydl_opts  = build_ydl_opts(quality_key, template)
+    # تسجيل الملفات الموجودة قبل التحميل
+    before_files = set(glob.glob(os.path.join(DOWNLOAD_DIR, "*")))
+
+    template = os.path.join(DOWNLOAD_DIR, "%(id)s_%(height)s.%(ext)s")
+    ydl_opts = build_ydl_opts(quality_key, template)
     file_path = None
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
 
-            # تحديد مسار الملف
-            downloads = info.get("requested_downloads", [{}])
-            file_path = downloads[0].get("filepath") if downloads else None
-            if not file_path:
+            # محاولة 1: من requested_downloads
+            downloads = info.get("requested_downloads", [])
+            if downloads and downloads[0].get("filepath"):
+                file_path = downloads[0]["filepath"]
+
+            # محاولة 2: prepare_filename
+            if not file_path or not os.path.exists(file_path):
                 file_path = ydl.prepare_filename(info)
 
+        # محاولة 3: مقارنة الملفات قبل وبعد
         if not file_path or not os.path.exists(file_path):
-            # البحث اليدوي في مجلد التحميل
-            vid_id = info.get("id", "")
-            candidates = [
-                os.path.join(DOWNLOAD_DIR, f)
-                for f in os.listdir(DOWNLOAD_DIR)
-                if f.startswith(vid_id)
-            ]
-            if candidates:
-                file_path = candidates[0]
-            else:
-                await query.edit_message_text("❌ لم يُعثر على الملف بعد التحميل.")
-                return
+            file_path = find_downloaded_file(DOWNLOAD_DIR, before_files)
+
+        # محاولة 4: أحدث ملف في المجلد
+        if not file_path or not os.path.exists(file_path):
+            all_files = glob.glob(os.path.join(DOWNLOAD_DIR, "*"))
+            if all_files:
+                file_path = max(all_files, key=os.path.getmtime)
+
+        if not file_path or not os.path.exists(file_path):
+            await query.edit_message_text("❌ لم يُعثر على الملف بعد التحميل.")
+            return
 
         # التحقق من الحجم
         size_mb = os.path.getsize(file_path) / (1024 * 1024)
@@ -181,7 +190,7 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
 
         ext = os.path.splitext(file_path)[1].lower()
         with open(file_path, "rb") as f:
-            if quality_key == "audio" or ext in (".m4a", ".mp3", ".ogg", ".opus"):
+            if quality_key == "audio" or ext in (".m4a", ".mp3", ".ogg", ".opus", ".webm"):
                 await query.message.reply_audio(
                     audio=f,
                     title=info.get("title", "audio")[:64],
