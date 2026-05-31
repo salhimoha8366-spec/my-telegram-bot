@@ -39,28 +39,13 @@ QUALITY_OPTIONS = {
     "audio":"🎵 صوت فقط",
 }
 
-def get_format(quality_key: str, is_youtube: bool) -> str:
-    """
-    يوتيوب: يدعم فلتر الجودة
-    باقي المنصات: best فقط بدون فلتر
-    """
-    if quality_key == "audio":
-        return "bestaudio[ext=m4a]/bestaudio"
+def is_youtube(url: str) -> bool:
+    return any(d in url for d in ["youtube.com", "youtu.be"])
 
-    if is_youtube:
-        h = quality_key  # 1080, 720, 480, 360
-        return (
-            f"best[height<={h}][ext=mp4]"
-            f"/best[height<={h}]"
-            f"/best[ext=mp4]"
-            f"/best"
-        )
-    else:
-        # منصات أخرى: خذ الأفضل المتاح مباشرة
-        return "best[ext=mp4]/best"
+def is_tiktok(url: str) -> bool:
+    return "tiktok.com" in url
 
-# ─────────────────────────────────────────────
-def base_ydl_opts() -> dict:
+def base_ydl_opts(url: str = "") -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -77,13 +62,34 @@ def base_ydl_opts() -> dict:
             ),
         },
     }
+    # ─── TikTok بدون علامة مائية ───
+    if is_tiktok(url):
+        opts["extractor_args"]["tiktok"] = {"webpage_download": ["1"]}
+        # download_addr هو الرابط بدون watermark في TikTok
+        opts["format"] = "download_addr-0/download_addr/play_addr/hd1/best"
+
     if os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
     return opts
 
 
-def is_youtube_url(url: str) -> bool:
-    return any(d in url for d in ["youtube.com", "youtu.be"])
+def get_format(quality_key: str, url: str) -> str:
+    if quality_key == "audio":
+        return "bestaudio[ext=m4a]/bestaudio"
+    # TikTok — الفورمات محدد مسبقاً في base_ydl_opts
+    if is_tiktok(url):
+        return "download_addr-0/download_addr/play_addr/hd1/best"
+    # يوتيوب — بفلتر الجودة
+    if is_youtube(url):
+        h = quality_key
+        return (
+            f"best[height<={h}][ext=mp4]"
+            f"/best[height<={h}]"
+            f"/best[ext=mp4]"
+            f"/best"
+        )
+    # باقي المنصات
+    return "best[ext=mp4]/best"
 
 
 def find_new_file(before: set) -> str | None:
@@ -105,11 +111,10 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     context.user_data["url"] = url
-    context.user_data["is_youtube"] = is_youtube_url(url)
     status = await update.message.reply_text("🔍 جاري قراءة معلومات الفيديو...")
 
     try:
-        with yt_dlp.YoutubeDL(base_ydl_opts()) as ydl:
+        with yt_dlp.YoutubeDL(base_ydl_opts(url)) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
         await status.edit_text(f"❌ تعذّر قراءة الرابط:\n`{e}`", parse_mode="Markdown")
@@ -121,23 +126,24 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mins, secs = divmod(int(duration), 60)
     context.user_data["title"] = title
 
-    # إذا مش يوتيوب — أزرار مبسطة
-    if not context.user_data["is_youtube"]:
-        buttons = [
-            [InlineKeyboardButton("⬇️ تحميل الفيديو", callback_data="quality:best")],
-            [InlineKeyboardButton("🎵 صوت فقط", callback_data="quality:audio")],
-        ]
-    else:
+    # أزرار حسب المنصة
+    if is_youtube(url):
         buttons = [
             [InlineKeyboardButton(label, callback_data=f"quality:{key}")]
             for key, label in QUALITY_OPTIONS.items()
+        ]
+    else:
+        platform = "TikTok 🚫💧" if is_tiktok(url) else "الفيديو"
+        buttons = [
+            [InlineKeyboardButton(f"⬇️ تحميل {platform}", callback_data="quality:best")],
+            [InlineKeyboardButton("🎵 صوت فقط", callback_data="quality:audio")],
         ]
 
     keyboard = InlineKeyboardMarkup(buttons)
     text = (
         f"🎬 *{title[:60]}*\n"
         f"👤 {uploader}   ⏱ {mins}:{secs:02d}\n\n"
-        f"اختر جودة التحميل:"
+        f"اختر طريقة التحميل:"
     )
     await status.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
@@ -148,8 +154,7 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
 
     quality_key = query.data.split(":")[1]
-    url         = context.user_data.get("url")
-    is_yt       = context.user_data.get("is_youtube", False)
+    url = context.user_data.get("url")
 
     if not url:
         await query.edit_message_text("❌ انتهت الجلسة، أرسل الرابط من جديد.")
@@ -157,14 +162,14 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
 
     label = QUALITY_OPTIONS.get(quality_key, "الجودة المتاحة")
     await query.edit_message_text(
-        f"⏳ جاري التحميل بجودة *{label}* ...", parse_mode="Markdown"
+        f"⏳ جاري التحميل *{label}* ...", parse_mode="Markdown"
     )
 
     before_files = set(glob.glob(os.path.join(DOWNLOAD_DIR, "*")))
-    fmt          = get_format(quality_key, is_yt)
-    template     = os.path.join(DOWNLOAD_DIR, "%(id)s_%(height)s.%(ext)s")
+    fmt      = get_format(quality_key, url)
+    template = os.path.join(DOWNLOAD_DIR, "%(id)s_%(height)s.%(ext)s")
 
-    opts = base_ydl_opts()
+    opts = base_ydl_opts(url)
     opts.update({
         "format": fmt,
         "outtmpl": template,
@@ -220,7 +225,7 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
                     read_timeout=180,
                     write_timeout=180,
                 )
-            elif ext in (".mp4", ".mov", ".avi", ".mkv"):
+            elif ext in (".mp4", ".mov", ".avi"):
                 await query.message.reply_video(
                     video=f,
                     supports_streaming=True,
@@ -228,7 +233,7 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
                     write_timeout=180,
                 )
             else:
-                # webm أو أي امتداد آخر — أرسله كملف
+                # webm أو غيره — أرسله كملف
                 await query.message.reply_document(
                     document=f,
                     filename=os.path.basename(file_path),
