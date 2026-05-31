@@ -1,5 +1,5 @@
 import os
-import asyncio
+import base64
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -17,11 +17,20 @@ if not BOT_TOKEN:
 
 MAX_FILE_SIZE_MB = 50
 DOWNLOAD_DIR = "downloads"
-COOKIES_FILE = "cookies.txt"  # ← ملف الكوكيز من يوتيوب
+COOKIES_FILE = "cookies.txt"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# ── استعادة cookies من متغير البيئة إن وُجد ──
+_cookies_b64 = os.getenv("COOKIES_B64")
+if _cookies_b64 and not os.path.exists(COOKIES_FILE):
+    try:
+        with open(COOKIES_FILE, "wb") as _f:
+            _f.write(base64.b64decode(_cookies_b64))
+        print("✅ cookies.txt تم استعادته من COOKIES_B64")
+    except Exception as _e:
+        print(f"⚠️ فشل استعادة cookies: {_e}")
+
 # ─────────────────────────────────────────────
-# خيارات الجودة
 QUALITY_OPTIONS = {
     "1080": ("FHD – 1080p", "bestvideo[height<=1080]+bestaudio/best[height<=1080]"),
     "720":  ("HD  –  720p", "bestvideo[height<=720]+bestaudio/best[height<=720]"),
@@ -31,22 +40,29 @@ QUALITY_OPTIONS = {
 }
 
 # ─────────────────────────────────────────────
-# إعدادات yt_dlp الأساسية المشتركة
 def base_ydl_opts() -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
         "socket_timeout": 30,
         "retries": 5,
-        "user_agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
+        # التظاهر بأنه تطبيق iOS لتجاوز حماية يوتيوب
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios", "web"],
+            }
+        },
+        "http_headers": {
+            "User-Agent": (
+                "com.google.ios.youtube/19.09.3 "
+                "(iPhone14,3; U; CPU iPhone OS 16_0 like Mac OS X)"
+            ),
+        },
     }
     # إضافة الكوكيز إذا كان الملف موجوداً
     if os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
+        print("🍪 استخدام cookies.txt")
     return opts
 
 
@@ -70,20 +86,18 @@ def build_ydl_opts(quality_key: str, output_template: str) -> dict:
 
 
 # ─────────────────────────────────────────────
-# المرحلة 1 – استقبال الرابط وعرض قائمة الجودة
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
 
     if not url.startswith(("http://", "https://")):
-        await update.message.reply_text("❌ أرسل رابط فيديو صحيح (يبدأ بـ http أو https).")
+        await update.message.reply_text("❌ أرسل رابط فيديو صحيح.")
         return
 
     context.user_data["url"] = url
     status = await update.message.reply_text("🔍 جاري قراءة معلومات الفيديو...")
 
     try:
-        ydl_info_opts = base_ydl_opts()
-        with yt_dlp.YoutubeDL(ydl_info_opts) as ydl:
+        with yt_dlp.YoutubeDL(base_ydl_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:
         await status.edit_text(f"❌ تعذّر قراءة الرابط:\n`{e}`", parse_mode="Markdown")
@@ -95,7 +109,6 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mins, secs = divmod(int(duration), 60)
     context.user_data["title"] = title
 
-    # بناء لوحة الجودة
     buttons = [
         [InlineKeyboardButton(label, callback_data=f"quality:{key}")]
         for key, (label, _) in QUALITY_OPTIONS.items()
@@ -111,7 +124,6 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────
-# المرحلة 2 – تحميل الفيديو بعد اختيار الجودة
 async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -126,8 +138,8 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
     label, _ = QUALITY_OPTIONS[quality_key]
     await query.edit_message_text(f"⏳ جاري التحميل بجودة *{label}* ...", parse_mode="Markdown")
 
-    template = os.path.join(DOWNLOAD_DIR, "%(id)s_%(height)s.%(ext)s")
-    ydl_opts = build_ydl_opts(quality_key, template)
+    template  = os.path.join(DOWNLOAD_DIR, "%(id)s_%(height)s.%(ext)s")
+    ydl_opts  = build_ydl_opts(quality_key, template)
     file_path = None
 
     try:
@@ -135,28 +147,25 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
             info = ydl.extract_info(url, download=True)
 
             if quality_key == "audio":
-                # البحث عن ملف mp3 في مجلد التحميل
                 vid_id = info.get("id", "")
-                mp3_candidates = [
+                mp3_list = [
                     f for f in os.listdir(DOWNLOAD_DIR)
                     if f.startswith(vid_id) and f.endswith(".mp3")
                 ]
-                if mp3_candidates:
-                    file_path = os.path.join(DOWNLOAD_DIR, mp3_candidates[0])
-                else:
-                    file_path = ydl.prepare_filename(info).rsplit(".", 1)[0] + ".mp3"
+                file_path = (
+                    os.path.join(DOWNLOAD_DIR, mp3_list[0]) if mp3_list
+                    else ydl.prepare_filename(info).rsplit(".", 1)[0] + ".mp3"
+                )
             else:
                 downloads = info.get("requested_downloads", [{}])
                 file_path = downloads[0].get("filepath") if downloads else None
                 if not file_path:
                     file_path = ydl.prepare_filename(info).rsplit(".", 1)[0] + ".mp4"
 
-        # التحقق من وجود الملف
         if not file_path or not os.path.exists(file_path):
             await query.edit_message_text("❌ لم يُعثر على الملف بعد التحميل.")
             return
 
-        # التحقق من الحجم
         size_mb = os.path.getsize(file_path) / (1024 * 1024)
         if size_mb > MAX_FILE_SIZE_MB:
             os.remove(file_path)
@@ -167,7 +176,6 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
 
-        # الرفع
         await query.edit_message_text(f"📤 جاري الرفع... ({size_mb:.1f} MB)")
 
         with open(file_path, "rb") as f:
