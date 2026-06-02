@@ -24,7 +24,7 @@ def safe_md(text: str) -> str:
     return escape_markdown(str(text), version=2)
 
 # ─────────────────────────────────────────────
-# (بقية الدوال is_youtube, is_tiktok, base_ydl_opts, get_format كما هي)
+# [بقية الدوال المساعدة مثل is_youtube, is_tiktok, base_ydl_opts, get_format هنا]
 # ...
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -48,7 +48,6 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uploader = info.get("uploader", "—")
     mins, secs = divmod(int(duration), 60)
     
-    # تنسيق آمن للعنوان
     safe_title = safe_md(title[:60])
     
     if is_youtube(url):
@@ -76,15 +75,42 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
     label = QUALITY_OPTIONS.get(quality_key, "الجودة المتاحة")
     await query.edit_message_text(f"⏳ جاري التحميل *{safe_md(label)}* ...", parse_mode="MarkdownV2")
 
-    # ... (بقية منطق التحميل كما هو) ...
-    # تذكر استخدام safe_md() عند إرسال أي نص يحتوي على متغيرات (title, error, etc)
-    
+    file_path = None
+    try:
+        before_files = set(glob.glob(os.path.join(DOWNLOAD_DIR, "*")))
+        fmt = get_format(quality_key, url)
+        template = os.path.join(DOWNLOAD_DIR, "%(id)s_%(height)s.%(ext)s")
+
+        opts = base_ydl_opts(url)
+        opts.update({"format": fmt, "outtmpl": template, "noplaylist": True, "prefer_ffmpeg": False, "postprocessors": []})
+
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            downloads = info.get("requested_downloads", [])
+            file_path = downloads[0]["filepath"] if downloads and downloads[0].get("filepath") else ydl.prepare_filename(info)
+
+        if not file_path or not os.path.exists(file_path):
+            await query.edit_message_text("❌ لم يُعثر على الملف.")
+            return
+
+        # ... (أضف هنا منطق الرفع وإرسال الملف الذي كان لديك سابقاً) ...
+        # تذكر استخدام safe_md() عند إرسال أي نصوص
+        
     except Exception as e:
-        # تنظيف الملفات في حالة الخطأ
-        if 'file_path' in locals() and file_path and os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             os.remove(file_path)
         
         await query.edit_message_text(
             f"❌ حدث خطأ تقني:\n`{safe_md(str(e)[:100])}`", 
             parse_mode="MarkdownV2"
         )
+
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    app.add_handler(CallbackQueryHandler(handle_quality_choice, pattern=r"^quality:"))
+    print("✅ البوت يعمل الآن...")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
